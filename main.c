@@ -6,6 +6,9 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <sys/syscall.h>
+#include <signal.h>
+#include <errno.h>
+
 
 #define CHAR_BUFF_SIZE 256
 #define GETDENTS_BUF_SIZE 1024
@@ -29,7 +32,7 @@ struct INSTANCE {
 	uint id;
 
 	char* user;
-	char* path;
+	char* path; 		// He wants this to be a linked list...? Which seems redundant since PATH is already a colon-separated list of directories, but I can do that if he wants.
 	char* cwd;
 	char* home;
 };
@@ -109,6 +112,50 @@ void output_CWD(struct INSTANCE* instance) {
 	printf("%s$ ", instance->cwd);
 }
 
+// This function checks if the given command exists in the directories specified in the PATH environment variable
+// If the command is found & show_all is false, it will execute the first instance of the command found in the PATH and return
+// If the command is found & show_all is true, it will output all instances of the command found in the PATH
+void which(const char* cmd, struct INSTANCE* instance, bool show_all) {
+	char* path_env = instance->path;
+	char* token = strtok(path_env, ":");	
+	char command_path[CHAR_BUFF_SIZE];
+	bool found = false;
+	while(token != NULL) {
+		command_path[0] = '\0';
+		strcat(command_path, token);
+		strcat(command_path, "/");
+		strcat(command_path, cmd);
+		if (access(command_path, X_OK) == 0) {
+			printf("%s\n", command_path);
+			found = true;
+		}
+		token = strtok(NULL, ":");
+	}
+	if (!found) {
+		printf("<%s>: Command not found.\n", cmd);
+	}
+}
+
+void kill_proc(const char* pid, int sig) {
+	if (kill(atoi(pid), sig) == -1) {
+		perror(errno == ESRCH ? "No such process" : "Could not kill process");
+	}
+}
+void init_shell(struct INSTANCE* instance) {
+	instance->user = getenv("USER");
+	instance->path = getenv("PATH");
+	instance->home = getenv("HOME");
+	instance->cwd = getenv("HOME");
+	chdir(instance->cwd);
+}
+
+void output_envr_vars(struct INSTANCE* instance) {
+	printf("User: %s\n", instance->user);
+	printf("Path: %s\n", instance->path);
+	printf("CWD: %s\n", instance->cwd);
+	printf("Home: %s\n", instance->home);
+}
+
 //reads input and ensures that fgets is cleared if a \0 is lost
 bool read_ln(char *buff, size_t size) {
   if (fgets(buff, size, stdin) == NULL) {
@@ -133,8 +180,23 @@ bool get_string_input(char *input, size_t size) {
 
 void resolve_user_input(char* user_input, struct INSTANCE* instance) {
 	switch(map_str_to_func(user_input)) {
+		case QUIT:
+			exit(0);
+			break;
+		case KILL:
+			kill_proc("12345", SIGKILL);
+			break;
 		case LIST:
 			list_dir(instance->cwd, false);
+			break;
+		case PWD:
+			output_CWD(instance);
+			break;
+		case PRINTENV:
+			output_envr_vars(instance);
+			break;
+		case WHICH:
+			which(user_input, instance, false);
 			break;
 		default:
 			printf("<%s>: Command not found.\n", user_input);
@@ -146,21 +208,6 @@ void run() {
 
 }
 
-void init_shell(struct INSTANCE* instance) {
-	instance->user = getenv("USER");
-	instance->path = getenv("PATH");
-	instance->home = getenv("HOME");
-	instance->cwd = getenv("HOME");
-	chdir(instance->cwd);
-}
-
-void output_envr_vars(struct INSTANCE* instance) {
-	printf("User: %s\n", instance->user);
-	printf("Path: %s\n", instance->path);
-	printf("CWD: %s\n", instance->cwd);
-	printf("Home: %s\n", instance->home);
-}
-
 int main() {
 	struct INSTANCE instance;
 	init_shell(&instance);
@@ -168,5 +215,7 @@ int main() {
 	if(valid_directory(instance.cwd)) {
 		list_dir(instance.cwd, false);
 	}
+	which("ls", &instance, false);
+	kill_proc("12345", SIGKILL);
 	return 0;
 }
