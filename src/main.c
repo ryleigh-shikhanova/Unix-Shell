@@ -15,6 +15,7 @@
 #define CHAR_BUFF_SIZE 256
 #define GETDENTS_BUF_SIZE 1024
 #define MAX_CMD_ARGS 16
+#define MAX_ENV_VARS 10
 
 extern char **environ;
 
@@ -44,7 +45,7 @@ struct INSTANCE {
     char cwd[CHAR_BUFF_SIZE];
     char *home;
 
-    struct ENV_VAR env_vars[10];
+    struct ENV_VAR env_vars[MAX_ENV_VARS];
     size_t env_var_count;
 };
 
@@ -132,14 +133,6 @@ void output_envr_vars(struct INSTANCE* instance) {
 		printf("%s=%s\n", instance->env_vars[i].name, instance->env_vars[i].value);
 	}
 
-}
-
-bool valid_directory(const char* path) {
-    int fd = open(path, O_RDONLY | O_DIRECTORY);
-    if (fd != -1) {
-        close(fd);
-    }
-    return (fd != -1) ? true : false;
 }
 
 void list_dir(const char *path, bool show_hidden) {
@@ -238,12 +231,12 @@ void set_env(const char *var, const char *value, struct INSTANCE *instance) {
 			}
 
             free(instance->env_vars[i].value);
-            instance->env_vars[i].value = strdup(value);
+            instance->env_vars[i].value = new_val;
             return;
         }
     }
 
-	if (instance->env_var_count >= 10) {
+	if (instance->env_var_count >= MAX_ENV_VARS) {
 		fprintf(stderr, "setenv: too many env vars\n");
 		return;
 	}
@@ -253,7 +246,6 @@ void set_env(const char *var, const char *value, struct INSTANCE *instance) {
 	instance->env_vars[i].name = strdup(var);
 	if (instance->env_vars[i].name == NULL) {
 		perror("strdup");
-		free(instance->env_vars[i].name);
 		return;
 	}
 
@@ -261,7 +253,6 @@ void set_env(const char *var, const char *value, struct INSTANCE *instance) {
 	if (instance->env_vars[i].value == NULL) {
 		perror("strdup");
 		free(instance->env_vars[i].name);
-		free(instance->env_vars[i].value);
 		instance->env_vars[i].name = NULL;
 		return;
 	}
@@ -343,13 +334,16 @@ bool get_string_input(char *input, size_t size) {
     return read_ln(input, size);
 }
 
-void get_user_input(char* input, size_t size) {
+// returns false is get_string_input fails
+bool get_user_input(char* input, size_t size) {
     if (!get_string_input(input, size)) {
         printf("Error reading input.\n");
+		return false;
     }
+	return true;
 }
 
-void execute_cmd(const char* path, char **argv) {
+void execute_cmd(const char* path, char **argv, struct INSTANCE *instance) {
 	pid_t pid = fork();
 
 	if (pid == -1) {
@@ -359,15 +353,21 @@ void execute_cmd(const char* path, char **argv) {
 
 	if (pid == 0) {
 		//child
+		for (size_t i = 0; i < instance->env_var_count; i++) {
+			if (setenv(instance->env_vars[i].name, instance->env_vars[i].value, 1) == -1) {
+				perror("setenv");
+				_exit(EXIT_FAILURE);
+			}
+		}
 		execve(path, argv, environ);
 
-		perror("child");
-		exit(EXIT_FAILURE);
+		perror("execve");
+		_exit(EXIT_FAILURE);
 	}
 
 	// parent
 	if (waitpid(pid, NULL, 0) == -1) {
-		perror("parent");
+		perror("waitpid");
 	}
 }
 
@@ -493,6 +493,13 @@ void handle_which(char **argv, struct INSTANCE *instance) {
         return;
     }
 
+	if (argv[1] != NULL && argv[2] != NULL) {
+		// rejects which ls ...
+
+        printf("Usage: which [-a] <cmd>\n");
+        return;		
+	}
+
     if (strcmp(argv[1], "-a") == 0) {
         if (argv[2] == NULL) {
             printf("Usage: which [-a] <cmd>\n");
@@ -511,7 +518,7 @@ void handle_unknown(char **argv, struct INSTANCE *instance) {
 
     if(argv[0][0] == '/') {
         if(access(argv[0], X_OK) == 0) {
-            execute_cmd(argv[0], argv);
+            execute_cmd(argv[0], argv, instance);
         } else {
             printf("<%s>: Command not found.\n", argv[0]);
         }
@@ -521,7 +528,7 @@ void handle_unknown(char **argv, struct INSTANCE *instance) {
 
     if (strncmp(argv[0], "./", 2) == 0 || strncmp(argv[0], "../", 3) == 0) {
 		if(access(argv[0], X_OK) == 0) {
-			execute_cmd(argv[0], argv);
+			execute_cmd(argv[0], argv, instance);
 		} else {
 			printf("<%s>: Command not found.\n", argv[0]);
 		}
@@ -530,14 +537,14 @@ void handle_unknown(char **argv, struct INSTANCE *instance) {
     } //rel path
 
     if (find_cmd(argv[0], instance, res, sizeof(res))) {
-		execute_cmd(res, argv);
+		execute_cmd(res, argv, instance);
 	} else {
 		printf("<%s>: Command not found.\n", argv[0]);
 	}
 }
 
 void resolve_user_input(char *user_input, struct INSTANCE *instance) {
-    char *argv[MAX_CMD_ARGS];
+    char *argv[MAX_CMD_ARGS] = {NULL};
     size_t argc = 0;
 
     char *token = strtok(user_input, " ");
@@ -546,8 +553,6 @@ void resolve_user_input(char *user_input, struct INSTANCE *instance) {
         argv[argc++] = token;
         token = strtok(NULL, " ");
     }
-
-    argv[argc] = NULL;
 
     if (argc == 0) {
         return;
@@ -602,8 +607,12 @@ void run(struct INSTANCE* instance) {
 
     while (1) {
         print_prompt(instance);
-        get_user_input(user_input, sizeof(user_input));
-        resolve_user_input(user_input, instance);
+        if (!get_user_input(user_input, sizeof(user_input))) {
+			printf("\n");
+			break;
+		}
+
+		resolve_user_input(user_input, instance);
     }
 }
 

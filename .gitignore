@@ -1,2 +1,21 @@
-#VS Code
+# VS Code
 .vscode/
+
+# CMake build output
+build/
+cmake-build-*/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Compiled binaries / objects
+*.o
+*.out
+shll
+
+# Debugging
+core
+core.*
