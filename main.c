@@ -9,248 +9,543 @@
 #include <signal.h>
 #include <errno.h>
 
+#include "get_path.h"
+
 #define CHAR_BUFF_SIZE 256
 #define GETDENTS_BUF_SIZE 1024
+#define MAX_CMD_ARGS 16
+
+extern char **environ;
 
 enum BUILT_IN_FUNCS {
-	QUIT,	
-	CD,
-	KILL,
-	LIST,
-	PID,
-	PRINTENV,
-	SETENV,
-	PWD,
-	WHICH,
-	UNKNOWN
+    QUIT,
+    CD,
+    KILL,
+    LIST,
+    PID,
+    PRINTENV,
+    SETENV,
+    PWD,
+    WHICH,
+    UNKNOWN
+};
+
+struct ENV_VAR {
+    char *name;
+    char *value;
 };
 
 struct INSTANCE {
-	pid_t id;
+    pid_t id;
 
-	char* user;
-	char* path; 		// He wants this to be a linked list...? Which seems redundant since PATH is already a colon-separated list of directories, but I can do that if he wants.
-	char* cwd;
-	char* home;
+    char *user;
+    path_t *path;
+    char cwd[CHAR_BUFF_SIZE];
+    char *home;
+
+    struct ENV_VAR env_vars[10];
+    size_t env_var_count;
+};
+
+struct linux_dirent {
+    long            d_ino;
+    off_t           d_off;
+    unsigned short  d_reclen;
+    char            d_name[];
 };
 
 enum BUILT_IN_FUNCS map_str_to_func(const char* cmd) {
-	if  (strcmp(cmd, "quit") == 0  ||
-		strcmp(cmd, "exit") == 0 ||
-		strcmp(cmd, "logout") == 0)	
-	{
-		return QUIT;
-	}
-	if(strcmp(cmd, "cd") == 0)
-		return CD;
-	if(strcmp(cmd, "kill") == 0)
-		return KILL;
-	if(strcmp(cmd, "list") == 0)
-		return LIST;
-	if(strcmp(cmd, "pid") == 0)
-		return PID;
-	if(strcmp(cmd, "printenv") == 0)
-		return PRINTENV;
-	if(strcmp(cmd, "setenv") == 0)
-		return SETENV;
-	if(strcmp(cmd, "pwd") == 0)
-		return PWD;
-	if(strcmp(cmd, "which") == 0)
-		return WHICH;
-	return UNKNOWN;
+    if  (strcmp(cmd, "quit") == 0  ||
+        strcmp(cmd, "exit") == 0 ||
+        strcmp(cmd, "logout") == 0)
+    {
+        return QUIT;
+    }
+    if(strcmp(cmd, "cd") == 0)
+        return CD;
+    if(strcmp(cmd, "kill") == 0)
+        return KILL;
+    if(strcmp(cmd, "list") == 0)
+        return LIST;
+    if(strcmp(cmd, "pid") == 0)
+        return PID;
+    if(strcmp(cmd, "printenv") == 0)
+        return PRINTENV;
+    if(strcmp(cmd, "setenv") == 0)
+        return SETENV;
+    if(strcmp(cmd, "pwd") == 0)
+        return PWD;
+    if(strcmp(cmd, "which") == 0)
+        return WHICH;
+    return UNKNOWN;
 }
 
-struct linux_dirent {
-	long 			d_ino;
-	off_t 			d_off;
-	unsigned short  d_reclen;
-	char 			d_name[];
-};
+void init_shell(struct INSTANCE *instance) {
+    instance->id = getpid();
+    instance->user = getenv("USER");
+    instance->path = getPath();
+    instance->home = getenv("HOME");
+    instance->env_var_count = 0;
 
-// This is based on the example provided in the man page for getdents(2)
-void list_dir(const char* path, bool show_hidden) {
-	int				fd;
-	long			nread;
-	char 			buf[GETDENTS_BUF_SIZE];
-	struct 			linux_dirent *dir;
-	unsigned int 	bpos;
-	char 			d_type;
-
-	fd = open(path, O_RDONLY | O_DIRECTORY);
-	if (fd == -1)
-		perror("open");
-	
-	for (;;) {
-		nread = syscall(SYS_getdents, fd, buf, GETDENTS_BUF_SIZE);
-		if (nread == -1)
-			perror("getdents");
-
-		if (nread == 0)
-			break;
-
-		for (bpos = 0; bpos < nread;) {
-			dir = (struct linux_dirent *) (buf + bpos);
-			if(dir->d_name[0] == '.' && !show_hidden) {
-				bpos += dir->d_reclen;
-				continue;
-			}
-			d_type = *(buf + bpos + dir->d_reclen - 1);
-			printf("%s:", dir->d_name);
-			printf("%s\n", (d_type == DT_DIR) ? "<DIR>" : "<FILE>");
-			bpos += dir->d_reclen;
-		}
-	}
-	close(fd);
+    if (getcwd(instance->cwd, sizeof(instance->cwd)) == NULL) {
+        perror("getcwd");
+        exit(EXIT_FAILURE);
+    }
 }
 
-// This function checks if the given path is a valid directory
-bool valid_directory(const char* path) {
-	int fd = open(path, O_RDONLY | O_DIRECTORY);
-	if (fd != -1) {
-		close(fd);
-	}
-	return (fd != -1) ? true : false;
-}
+void free_path_list(path_t* pathlist) {
+    path_t* current = pathlist;
 
-void output_pwd(struct INSTANCE* instance) {
-	printf("%s$ ", instance->cwd);
+    while (current != NULL) {
+        path_t* next = current->next;
+        free(current->element);
+        free(current);
+        current = next;
+    }
 }
 
 void print_prompt(struct INSTANCE* instance) {
-	printf("%s@%s > ", instance->user, instance->cwd);
+    printf("%s@%s > ", instance->user, instance->cwd);
 }
+
+void output_pwd(struct INSTANCE *instance) {
+    printf("%s\n", instance->cwd);
+}
+
+void output_envr_vars(struct INSTANCE* instance) {
+    path_t* curr = instance->path;
+
+    printf("User: %s\n", instance->user);
+    printf("PID: %d\n", instance->id);
+    printf("PATH: ");
+
+    while(curr != NULL) {
+        printf("%s :", curr->element);
+        curr = curr->next;
+    }
+
+    printf("CWD: %s\n", instance->cwd);
+    printf("Home: %s\n", instance->home);
+	
+	for(size_t i = 0; i < instance->env_var_count; ++i){
+		printf("%s=%s\n", instance->env_vars[i].name, instance->env_vars[i].value);
+	}
+
+}
+
+bool valid_directory(const char* path) {
+    int fd = open(path, O_RDONLY | O_DIRECTORY);
+    if (fd != -1) {
+        close(fd);
+    }
+    return (fd != -1) ? true : false;
+}
+
+void list_dir(const char *path, bool show_hidden) {
+    int fd;
+    long nread;
+    char buf[GETDENTS_BUF_SIZE];
+    struct linux_dirent *dir;
+    long bpos;
+    char d_type;
+
+    fd = open(path, O_RDONLY | O_DIRECTORY);
+
+    if (fd == -1) {
+        perror("open");
+        return;
+    }
+
+    for (;;) {
+        nread = syscall(SYS_getdents, fd, buf, GETDENTS_BUF_SIZE);
+
+        if (nread == -1) {
+            perror("getdents");
+            close(fd);
+            return;
+        }
+
+        if (nread == 0)
+            break;
+
+        for (bpos = 0; bpos < nread;) {
+            dir = (struct linux_dirent *)(buf + bpos);
+
+            if (dir->d_reclen == 0) {
+                fprintf(stderr, "getdents: invalid directory entry\n");
+                close(fd);
+                return;
+            }
+
+            if (dir->d_name[0] == '.' && !show_hidden) {
+                bpos += dir->d_reclen;
+                continue;
+            }
+
+            d_type = *(buf + bpos + dir->d_reclen - 1);
+
+            printf("%s:", dir->d_name);
+            printf(
+                "%s\n",
+                (d_type == DT_DIR) ? "<DIR>" : "<FILE>"
+            );
+
+            bpos += dir->d_reclen;
+        }
+    }
+    close(fd);
+}
+
+void cd(const char *path, struct INSTANCE *instance) {
+    const char *target;
+
+    if (path == NULL || strcmp(path, "~") == 0) {
+        target = instance->home;
+    } else {
+        target = path;
+    }
+
+    if (chdir(target) == -1) {
+        perror("cd");
+        return;
+    }
+
+    if (getcwd(instance->cwd, sizeof(instance->cwd)) == NULL) {
+        perror("getcwd");
+    }
+}
+
+void pid(struct INSTANCE* instance) {
+    printf("PID: %d\n", instance->id);
+}
+
+void kill_proc(const char* pid, int sig) {
+    if (kill(atoi(pid), sig) == -1) {
+        perror(errno == ESRCH ? "No such process" : "Could not kill process");
+    }
+}
+
+void set_env(const char *var, const char *value, struct INSTANCE *instance) {
+    for (size_t i = 0; i < instance->env_var_count; i++) {
+        if (strcmp(instance->env_vars[i].name, var) == 0) {
+            free(instance->env_vars[i].value);
+            instance->env_vars[i].value = strdup(value);
+            return;
+        }
+    }
+
+	if (instance->env_var_count >= 10) {
+		fprintf(stderr, "setenv: too many env vars\n");
+		return;
+	}
+
+	size_t i = instance->env_var_count;
+
+	instance->env_vars[i].name = strdup(var);
+	instance->env_vars[i].value = strdup(value);
+
+	instance->env_var_count++;
+}
+
 // This function checks if the given command exists in the directories specified in the PATH environment variable
 // If the command is found & show_all is false, it will execute the first instance of the command found in the PATH and return
 // If the command is found & show_all is true, it will output all instances of the command found in the PATH
 void which(const char* cmd, struct INSTANCE* instance, bool show_all) {
-	char* path_env = instance->path;
-	char* env_copy = strdup(path_env); 
-	char* token = strtok(env_copy, ":");	
-	char  command_path[CHAR_BUFF_SIZE];
-	bool  found = false;
+    path_t* curr = instance->path;
+    bool found = false;
+    char command_path[CHAR_BUFF_SIZE];
 
-	while(token != NULL) {
-		snprintf(command_path, sizeof(command_path), "%s/%s", token, cmd);
-		if (access(command_path, X_OK) == 0) {
-			printf("%s\n", command_path);
-			found = true;
-		}
-		token = strtok(NULL, ":");
-	}
-	if (!found) {
-		printf("<%s>: Command not found.\n", cmd);
-	}
+    while(curr != NULL) {
+        int w = snprintf(command_path, sizeof(command_path), "%s/%s", curr->element, cmd);
+
+        if (w >= 0 && (size_t)w < sizeof(command_path) && access(command_path, X_OK) == 0) {
+            printf("%s\n", command_path);
+            found = true;
+            if(!show_all) {
+                return;
+            }
+        }
+
+        curr = curr->next;
+    }
+
+    if(!found) {
+        printf("<%s>: Command not found.\n", cmd);
+    }
 }
 
-void cd(const char* path, struct INSTANCE* instance) {
-	if(path == NULL || strcmp(path, "~") == 0) {
-		chdir(instance->home);
-	}else{
-		valid_directory(path) ? chdir(path) : printf("<%s>: No such directory.\n", path);	
-	}
-	instance->cwd = getcwd(NULL, 0);
-}
+bool find_cmd(const char* cmd, struct INSTANCE* instance, char* res, size_t res_size) {
+    path_t* curr = instance->path;
 
-void pid(struct INSTANCE* instance) {
-	printf("PID: %d\n", instance->id);
-}
+    while(curr != NULL) {
+        int w = snprintf(res, res_size, "%s/%s", curr->element, cmd);
 
-void kill_proc(const char* pid, int sig) {
-	if (kill(atoi(pid), sig) == -1) {
-		perror(errno == ESRCH ? "No such process" : "Could not kill process");
-	}
-}
+        if (w >= 0 && (size_t)w < res_size && access(res, X_OK) == 0) {
+            return true;
+        }
 
-void set_env(const char* var, const char* value, int overwrite) {
-	return;
-}
+        curr = curr->next;
+    }
 
-void init_shell(struct INSTANCE* instance) {
-	instance->id = getpid();
-	instance->user = getenv("USER");
-	instance->path = getenv("PATH");
-	instance->home = getenv("HOME");
-	instance->cwd = getcwd(NULL, 0);
-	cd(instance->cwd, instance);
-}
-
-void output_envr_vars(struct INSTANCE* instance) {
-	printf("User: %s\n", instance->user);
-	printf("PID: %d\n", instance->id);
-	printf("Path: %s\n", instance->path);
-	printf("CWD: %s\n", instance->cwd);
-	printf("Home: %s\n", instance->home);
+    return false;
 }
 
 //reads input and ensures that fgets is cleared if a \0 is lost
 bool read_ln(char *buff, size_t size) {
-  if (fgets(buff, size, stdin) == NULL) {
-    return false;
-  }
+    if (fgets(buff, size, stdin) == NULL) {
+        return false;
+    }
 
-  size_t len = strlen(buff);
+    size_t len = strlen(buff);
 
-  if (len > 0 && buff[len - 1] == '\n') {
-    buff[len - 1] = '\0';
-  }
-  else {
-    int ch;
-    while ((ch = getchar()) != '\n' && ch != EOF){}
-  }
-  return true;
+    if (len > 0 && buff[len - 1] == '\n') {
+        buff[len - 1] = '\0';
+    }
+
+    else {
+        int ch;
+        while ((ch = getchar()) != '\n' && ch != EOF){}
+    }
+
+    return true;
 }
 
 bool get_string_input(char *input, size_t size) {
-  return read_ln(input, size);
+    return read_ln(input, size);
 }
 
-void resolve_user_input(char* user_input, struct INSTANCE* instance) {
-	switch(map_str_to_func(user_input)) {
-		case QUIT:
-			exit(0);
-			break;
-		case CD:
-			cd(NULL, instance);
-			break;
-		case KILL:
-			kill_proc("12345", SIGKILL);
-			break;
-		case LIST:
-			list_dir(instance->cwd, false);
-			break;
-		case PID:
-			pid(instance);
-			break;
-		case PWD:
-			output_pwd(instance);
-			break;
-		case PRINTENV:
-			output_envr_vars(instance);
-			break;
-		case SETENV:
-			set_env(user_input, NULL, 1);
-			break;
-		case WHICH:
-			which(user_input, instance, false);
-			break;
-		default:
-			printf("<%s>: Command not found.\n", user_input);
-			break;
-	}	
+void get_user_input(char* input, size_t size) {
+    if (!get_string_input(input, size)) {
+        printf("Error reading input.\n");
+    }
 }
 
-void run() {
+// these functions are helpers to resolve_user_input
 
+void handle_exit(char **argv, struct INSTANCE *instance) {
+	if(argv[1] != NULL) {
+		printf("Usage: exit\n");
+		return;
+	}
+
+	free_path_list(instance->path);
+	exit(0);
+}
+
+void handle_cd(char **argv, struct INSTANCE *instance) {
+    if(argv[1] == NULL) {
+        cd(NULL, instance);
+        return;
+    }
+
+    if(argv[2] != NULL) {
+        printf("Usage: cd <dir>\n");
+        return;
+    }
+
+    cd(argv[1], instance);
+}
+
+void handle_kill(char **argv) {
+    if (argv[1] == NULL) {
+        printf("Usage: kill [-signal] <pid>\n");
+        return;
+    }
+
+    if (argv[2] == NULL) {
+        kill_proc(argv[1], SIGTERM);
+        return;
+    }
+
+    if (argv[1][0] == '-') {
+        kill_proc(argv[2], atoi(argv[1] + 1));
+        return;
+    }
+
+    printf("Usage: kill [-signal] <pid>\n");
+}
+
+void handle_list(char **argv, struct INSTANCE *instance) {
+    if (argv[1] == NULL) {
+        list_dir(instance->cwd, false);
+        return;
+    }
+
+    for (int i = 1; argv[i] != NULL; i++) {
+        printf("\n%s:\n", argv[i]);
+        list_dir(argv[i], false);
+    }
+}
+
+void handle_pid(char **argv, struct INSTANCE *instance) {
+    if(argv[1] != NULL) {
+        printf("Usage: pid\n");
+        return;
+    }
+
+    pid(instance);
+}
+
+void handle_printenv(char **argv, struct INSTANCE *instance) {
+    if (argv[1] != NULL) {
+        printf("Usage: printenv\n");
+        return;
+    }
+
+    output_envr_vars(instance);
+}
+
+void handle_setenv(char **argv, struct INSTANCE *instance) {
+	if (argv[3] != NULL) {
+		//excess arg
+
+        printf("Usage: setenv <var> [value]\n");
+        return;
+    }
+
+	if(argv[1] == NULL) {
+		//no env_var name
+
+		printf("Usage: setenv <var> [value]\n");
+		return;
+	}
+
+	if(argv[2] == NULL) {
+		// not env_var value
+
+		set_env(argv[1], "", instance);
+		return;
+	}
+
+    set_env(argv[1], argv[2], instance);
+}
+
+void handle_pwd(char **argv, struct INSTANCE *instance) {
+    if(argv[1] != NULL) {
+        printf("Usage: pwd\n");
+        return;
+    }
+
+    output_pwd(instance);
+}
+
+void handle_which(char **argv, struct INSTANCE *instance) {
+    if (argv[1] == NULL) {
+        printf("Usage: which [-a] <cmd>\n");
+        return;
+    }
+
+    if (strcmp(argv[1], "-a") == 0) {
+        if (argv[2] == NULL) {
+            printf("Usage: which [-a] <cmd>\n");
+            return;
+        }
+
+        which(argv[2], instance, true);
+        return;
+    }
+
+    which(argv[1], instance, false);
+}
+
+void handle_unknown(char **argv, struct INSTANCE *instance) {
+    char res[CHAR_BUFF_SIZE];       //holds the executable path if found
+
+    if(argv[0][0] == '/') {
+        //abs path
+        if(access(argv[0], X_OK) == 0) {
+            //execv(argv[0], argv);
+        } else {
+            printf("<%s>: Command not found.\n", argv[0]);
+        }
+    } //abs path
+
+    else if (strncmp(argv[0], "./", 2) == 0 || strncmp(argv[0], "../", 3) == 0) {
+        //rel path
+
+    } //rel path
+
+    else{
+        if(!find_cmd(argv[0], instance, res, CHAR_BUFF_SIZE)) {
+            printf("<%s>: Command not found.\n", argv[0]);
+        }
+    }
+}
+
+void resolve_user_input(char *user_input, struct INSTANCE *instance) {
+    char *argv[MAX_CMD_ARGS];
+    size_t argc = 0;
+
+    char *token = strtok(user_input, " ");
+
+    while (token != NULL && argc < MAX_CMD_ARGS - 1) {
+        argv[argc++] = token;
+        token = strtok(NULL, " ");
+    }
+
+    argv[argc] = NULL;
+
+    if (argc == 0) {
+        return;
+	}
+
+    switch (map_str_to_func(argv[0])) {
+        case QUIT:
+            handle_exit(argv, instance);
+            break;
+
+        case CD:
+            handle_cd(argv, instance);
+            break;
+
+        case KILL:
+            handle_kill(argv);
+            break;
+
+        case LIST:
+            handle_list(argv, instance);
+            break;
+
+        case PID:
+            handle_pid(argv, instance);
+            break;
+
+        case PWD:
+            handle_pwd(argv, instance);
+            break;
+
+        case PRINTENV:
+            handle_printenv(argv, instance);
+            break;
+
+        case SETENV:
+            handle_setenv(argv, instance);
+            break;
+
+        case WHICH:
+            handle_which(argv, instance);
+            break;
+
+        case UNKNOWN: {
+            handle_unknown(argv, instance);
+            break;
+        }
+    }
+}
+
+void run(struct INSTANCE* instance) {
+    char user_input[CHAR_BUFF_SIZE];
+
+    while (1) {
+        print_prompt(instance);
+        get_user_input(user_input, sizeof(user_input));
+        resolve_user_input(user_input, instance);
+    }
 }
 
 int main() {
-	struct INSTANCE instance;
-	init_shell(&instance);
-	print_prompt(&instance);
-	cd(NULL, &instance);
-	cd("./Coding", &instance);
-	if(valid_directory(instance.cwd)) {
-		list_dir(instance.cwd, false);
-	}
-	return 0;
+    struct INSTANCE instance;
+    init_shell(&instance);
+    run(&instance);
+    return 0;
 }
