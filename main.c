@@ -8,6 +8,7 @@
 #include <sys/syscall.h>
 #include <signal.h>
 #include <errno.h>
+#include <sys/wait.h>
 
 #include "get_path.h"
 
@@ -117,16 +118,16 @@ void output_envr_vars(struct INSTANCE* instance) {
 
     printf("User: %s\n", instance->user);
     printf("PID: %d\n", instance->id);
-    printf("PATH: ");
+    printf("PATH: \n");
 
     while(curr != NULL) {
-        printf("%s :", curr->element);
+        printf(":%s \n", curr->element);
         curr = curr->next;
     }
 
     printf("CWD: %s\n", instance->cwd);
     printf("Home: %s\n", instance->home);
-	
+
 	for(size_t i = 0; i < instance->env_var_count; ++i){
 		printf("%s=%s\n", instance->env_vars[i].name, instance->env_vars[i].value);
 	}
@@ -184,11 +185,12 @@ void list_dir(const char *path, bool show_hidden) {
 
             d_type = *(buf + bpos + dir->d_reclen - 1);
 
-            printf("%s:", dir->d_name);
+            printf("%s ", dir->d_name);
             printf(
-                "%s\n",
+                "%s",
                 (d_type == DT_DIR) ? "<DIR>" : "<FILE>"
             );
+			printf("\n");
 
             bpos += dir->d_reclen;
         }
@@ -228,6 +230,13 @@ void kill_proc(const char* pid, int sig) {
 void set_env(const char *var, const char *value, struct INSTANCE *instance) {
     for (size_t i = 0; i < instance->env_var_count; i++) {
         if (strcmp(instance->env_vars[i].name, var) == 0) {
+			char* new_val = strdup(value);
+
+			if(new_val == NULL) {
+				perror("strdup");
+				return;
+			}
+
             free(instance->env_vars[i].value);
             instance->env_vars[i].value = strdup(value);
             return;
@@ -242,9 +251,29 @@ void set_env(const char *var, const char *value, struct INSTANCE *instance) {
 	size_t i = instance->env_var_count;
 
 	instance->env_vars[i].name = strdup(var);
+	if (instance->env_vars[i].name == NULL) {
+		perror("strdup");
+		free(instance->env_vars[i].name);
+		return;
+	}
+
 	instance->env_vars[i].value = strdup(value);
+	if (instance->env_vars[i].value == NULL) {
+		perror("strdup");
+		free(instance->env_vars[i].name);
+		free(instance->env_vars[i].value);
+		instance->env_vars[i].name = NULL;
+		return;
+	}
 
 	instance->env_var_count++;
+}
+
+void free_env_vars(struct INSTANCE *instance) {
+    for (size_t i = 0; i < instance->env_var_count; i++) {
+        free(instance->env_vars[i].name);
+        free(instance->env_vars[i].value);
+    }
 }
 
 // This function checks if the given command exists in the directories specified in the PATH environment variable
@@ -320,14 +349,34 @@ void get_user_input(char* input, size_t size) {
     }
 }
 
-// these functions are helpers to resolve_user_input
+void execute_cmd(const char* path, char **argv) {
+	pid_t pid = fork();
+
+	if (pid == -1) {
+		perror("fork");
+		return;
+	}
+
+	if (pid == 0) {
+		//child
+		execve(path, argv, environ);
+
+		perror("child");
+		exit(EXIT_FAILURE);
+	}
+
+	// parent
+	if (waitpid(pid, NULL, 0) == -1) {
+		perror("parent");
+	}
+}
 
 void handle_exit(char **argv, struct INSTANCE *instance) {
 	if(argv[1] != NULL) {
 		printf("Usage: exit\n");
 		return;
 	}
-
+	free_env_vars(instance);
 	free_path_list(instance->path);
 	exit(0);
 }
@@ -347,6 +396,10 @@ void handle_cd(char **argv, struct INSTANCE *instance) {
 }
 
 void handle_kill(char **argv) {
+	if (argv[3] != NULL) {
+        printf("Usage: kill [-signal] <pid>\n");
+		return;
+	}
     if (argv[1] == NULL) {
         printf("Usage: kill [-signal] <pid>\n");
         return;
@@ -424,12 +477,17 @@ void handle_pwd(char **argv, struct INSTANCE *instance) {
     if(argv[1] != NULL) {
         printf("Usage: pwd\n");
         return;
-    }
+    } 
 
     output_pwd(instance);
 }
 
 void handle_which(char **argv, struct INSTANCE *instance) {
+	if (argv[3] != NULL) {
+		printf("Usage: which [-a] <cmd>\n");
+        return;
+	}
+
     if (argv[1] == NULL) {
         printf("Usage: which [-a] <cmd>\n");
         return;
@@ -449,27 +507,33 @@ void handle_which(char **argv, struct INSTANCE *instance) {
 }
 
 void handle_unknown(char **argv, struct INSTANCE *instance) {
-    char res[CHAR_BUFF_SIZE];       //holds the executable path if found
+    char res[CHAR_BUFF_SIZE];
 
     if(argv[0][0] == '/') {
-        //abs path
         if(access(argv[0], X_OK) == 0) {
-            //execv(argv[0], argv);
+            execute_cmd(argv[0], argv);
         } else {
             printf("<%s>: Command not found.\n", argv[0]);
         }
+
+		return;
     } //abs path
 
-    else if (strncmp(argv[0], "./", 2) == 0 || strncmp(argv[0], "../", 3) == 0) {
-        //rel path
+    if (strncmp(argv[0], "./", 2) == 0 || strncmp(argv[0], "../", 3) == 0) {
+		if(access(argv[0], X_OK) == 0) {
+			execute_cmd(argv[0], argv);
+		} else {
+			printf("<%s>: Command not found.\n", argv[0]);
+		}
 
+		return;
     } //rel path
 
-    else{
-        if(!find_cmd(argv[0], instance, res, CHAR_BUFF_SIZE)) {
-            printf("<%s>: Command not found.\n", argv[0]);
-        }
-    }
+    if (find_cmd(argv[0], instance, res, sizeof(res))) {
+		execute_cmd(res, argv);
+	} else {
+		printf("<%s>: Command not found.\n", argv[0]);
+	}
 }
 
 void resolve_user_input(char *user_input, struct INSTANCE *instance) {
