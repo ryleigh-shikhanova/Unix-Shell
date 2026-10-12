@@ -15,7 +15,6 @@
 #define CHAR_BUFF_SIZE 256
 #define GETDENTS_BUF_SIZE 1024
 #define MAX_CMD_ARGS 16
-#define MAX_ENV_VARS 10
 
 extern char **environ;
 
@@ -32,11 +31,6 @@ enum BUILT_IN_FUNCS {
     UNKNOWN
 };
 
-struct ENV_VAR {
-    char *name;
-    char *value;
-};
-
 struct INSTANCE {
     pid_t id;
 
@@ -44,9 +38,6 @@ struct INSTANCE {
     path_t *path;
     char cwd[CHAR_BUFF_SIZE];
     char *home;
-
-    struct ENV_VAR env_vars[MAX_ENV_VARS];
-    size_t env_var_count;
 };
 
 struct linux_dirent {
@@ -87,7 +78,6 @@ void init_shell(struct INSTANCE *instance) {
     instance->user = getenv("USER");
     instance->path = getPath();
     instance->home = getenv("HOME");
-    instance->env_var_count = 0;
 
     if (getcwd(instance->cwd, sizeof(instance->cwd)) == NULL) {
         perror("getcwd");
@@ -120,18 +110,12 @@ void output_envr_vars(struct INSTANCE* instance) {
     printf("User: %s\n", instance->user);
     printf("PID: %d\n", instance->id);
     printf("PATH: \n");
-
     while(curr != NULL) {
         printf(":%s \n", curr->element);
         curr = curr->next;
     }
-
     printf("CWD: %s\n", instance->cwd);
     printf("Home: %s\n", instance->home);
-
-	for(size_t i = 0; i < instance->env_var_count; ++i){
-		printf("%s=%s\n", instance->env_vars[i].name, instance->env_vars[i].value);
-	}
 
 }
 
@@ -214,57 +198,45 @@ void pid(struct INSTANCE* instance) {
     printf("PID: %d\n", instance->id);
 }
 
-void kill_proc(const char* pid, int sig) {
-    if (kill(atoi(pid), sig) == -1) {
-        perror(errno == ESRCH ? "No such process" : "Could not kill process");
+bool parse_pid(const char *str, pid_t *pid) {
+    char *endptr;
+    long value;
+
+    errno = 0;
+    value = strtol(str, &endptr, 10);
+
+    if (errno != 0 || *endptr != '\0' || value <= 0) {
+        return false;
     }
+
+    *pid = (pid_t)value;
+    return true;
 }
 
-void set_env(const char *var, const char *value, struct INSTANCE *instance) {
-    for (size_t i = 0; i < instance->env_var_count; i++) {
-        if (strcmp(instance->env_vars[i].name, var) == 0) {
-			char* new_val = strdup(value);
+void kill_proc(const char *pid_str, int sig) {
+    pid_t pid;
 
-			if(new_val == NULL) {
-				perror("strdup");
-				return;
-			}
+    if (!parse_pid(pid_str, &pid)) {
+        fprintf(stderr, "Invalid PID: %s\n", pid_str);
+        return;
+    }
 
-            free(instance->env_vars[i].value);
-            instance->env_vars[i].value = new_val;
-            return;
+    if (kill(pid, sig) == -1) {
+        if (errno == ESRCH) {
+            fprintf(stderr, "No such process\n");
+        } else {
+            perror("kill");
         }
     }
-
-	if (instance->env_var_count >= MAX_ENV_VARS) {
-		fprintf(stderr, "setenv: too many env vars\n");
-		return;
-	}
-
-	size_t i = instance->env_var_count;
-
-	instance->env_vars[i].name = strdup(var);
-	if (instance->env_vars[i].name == NULL) {
-		perror("strdup");
-		return;
-	}
-
-	instance->env_vars[i].value = strdup(value);
-	if (instance->env_vars[i].value == NULL) {
-		perror("strdup");
-		free(instance->env_vars[i].name);
-		instance->env_vars[i].name = NULL;
-		return;
-	}
-
-	instance->env_var_count++;
 }
 
-void free_env_vars(struct INSTANCE *instance) {
-    for (size_t i = 0; i < instance->env_var_count; i++) {
-        free(instance->env_vars[i].name);
-        free(instance->env_vars[i].value);
+bool set_env(const char *name, const char *value) {
+    if (setenv(name, value, 1) == -1) {
+        perror("setenv");
+        return false;
     }
+
+    return true;
 }
 
 // This function checks if the given command exists in the directories specified in the PATH environment variable
@@ -352,13 +324,6 @@ void execute_cmd(const char* path, char **argv, struct INSTANCE *instance) {
 	}
 
 	if (pid == 0) {
-		//child
-		for (size_t i = 0; i < instance->env_var_count; i++) {
-			if (setenv(instance->env_vars[i].name, instance->env_vars[i].value, 1) == -1) {
-				perror("setenv");
-				_exit(EXIT_FAILURE);
-			}
-		}
 		execve(path, argv, environ);
 
 		perror("execve");
@@ -376,7 +341,6 @@ void handle_exit(char **argv, struct INSTANCE *instance) {
 		printf("Usage: exit\n");
 		return;
 	}
-	free_env_vars(instance);
 	free_path_list(instance->path);
 	exit(0);
 }
@@ -410,11 +374,18 @@ void handle_kill(char **argv) {
         return;
     }
 
-    if (argv[1][0] == '-') {
-        kill_proc(argv[2], atoi(argv[1] + 1));
-        return;
-    }
+    char *endptr;
+    long sig;
 
+    errno = 0;
+    sig = strtol(argv[1] + 1, &endptr, 10);
+
+    if (errno != 0 || *endptr != '\0' || sig <= 0) {
+        fprintf(stderr, "Invalid signal: %s\n", argv[1]);
+        return;
+    } else {
+        kill_proc(argv[2], (int)sig);
+    }
     printf("Usage: kill [-signal] <pid>\n");
 }
 
@@ -439,38 +410,29 @@ void handle_pid(char **argv, struct INSTANCE *instance) {
     pid(instance);
 }
 
-void handle_printenv(char **argv, struct INSTANCE *instance) {
+void handle_printenv(char **argv) {
     if (argv[1] != NULL) {
-        printf("Usage: printenv\n");
+        fprintf(stderr, "Usage: printenv\n");
         return;
     }
 
-    output_envr_vars(instance);
+    for (char **env = environ; *env != NULL; ++env) {
+        printf("%s\n", *env);
+    }
 }
 
-void handle_setenv(char **argv, struct INSTANCE *instance) {
-	if (argv[3] != NULL) {
-		//excess arg
-
-        printf("Usage: setenv <var> [value]\n");
+void handle_setenv(char **argv) {
+    if (argv[1] == NULL || argv[3] != NULL) {
+        fprintf(stderr, "Usage: setenv <var> [value]\n");
         return;
     }
 
-	if(argv[1] == NULL) {
-		//no env_var name
+    if (argv[2] == NULL) {
+        set_env(argv[1], "");
+        return;
+    }
 
-		printf("Usage: setenv <var> [value]\n");
-		return;
-	}
-
-	if(argv[2] == NULL) {
-		// not env_var value
-
-		set_env(argv[1], "", instance);
-		return;
-	}
-
-    set_env(argv[1], argv[2], instance);
+    set_env(argv[1], argv[2]);
 }
 
 void handle_pwd(char **argv, struct INSTANCE *instance) {
@@ -577,11 +539,11 @@ void resolve_user_input(char *user_input, struct INSTANCE *instance) {
             break;
 
         case PRINTENV:
-            handle_printenv(argv, instance);
+            handle_printenv(argv);
             break;
 
         case SETENV:
-            handle_setenv(argv, instance);
+            handle_setenv(argv);
             break;
 
         case WHICH:
