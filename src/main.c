@@ -483,31 +483,24 @@ void handle_pwd(char **argv, struct INSTANCE *instance) {
 }
 
 void handle_which(char **argv, struct INSTANCE *instance) {
-	if (argv[3] != NULL) {
-		printf("Usage: which [-a] <cmd>\n");
-        return;
-	}
-
     if (argv[1] == NULL) {
         printf("Usage: which [-a] <cmd>\n");
         return;
     }
 
-	if (argv[1] != NULL && argv[2] != NULL) {
-		// rejects which ls ...
-
-        printf("Usage: which [-a] <cmd>\n");
-        return;		
-	}
-
     if (strcmp(argv[1], "-a") == 0) {
-        if (argv[2] == NULL) {
+        if (argv[2] == NULL || argv[3] != NULL) {
             printf("Usage: which [-a] <cmd>\n");
             return;
         }
 
         which(argv[2], instance, true);
         return;
+    }
+
+    if (argv[2] != NULL) {
+        printf("Usage: which [-a] <cmd>\n");
+        return;        
     }
 
     which(argv[1], instance, false);
